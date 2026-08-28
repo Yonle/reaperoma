@@ -5,8 +5,6 @@ set -u
 progname="reaperoma"
 distsdir="dists"
 
-CGO_ENABLED=0
-
 init() {
 	if ! command -v go >/dev/null 2>&1; then
 		echo "go command not found."
@@ -63,7 +61,7 @@ compile() {
 
 	echo "--- Compiling for $os/$arch platform"
 
-	if ! GOOS="$os" GOARCH="$arch" \
+	if ! CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
 		go build -o "$distdir/$progname$winex" ../; then
 
 		echo "--- Compilation failed for $os/$arch. Destroying distdir..."
