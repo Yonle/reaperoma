@@ -1,13 +1,13 @@
-# deathreaperoma
+# reaperoma
 
-`deathreaperoma` is a Go tool that automatically cleans up stale, unconfirmed users from Pleroma instances.
+`reaperoma` is a Go tool that automatically cleans up stale, unconfirmed users from Pleroma instances.
 
 It periodically checks local, unconfirmed accounts and deletes accounts that have exceeded the configured registration age.
 
 ## Usage
 
 ```bash
-deathreaperoma \
+reaperoma \
   -pleromahost https://example.com \
   -admintoken 'your-admin-token' \
   -cleanAge 1d \
