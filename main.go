@@ -149,7 +149,7 @@ func main() {
 	flag.Parse()
 
 	if *host == "" {
-		fmt.Fprintln(os.Stderr, "error: -pleromahost is required")
+		fmt.Fprintln(os.Stderr, "error: -host is required")
 		os.Exit(2)
 	}
 
@@ -165,11 +165,11 @@ func main() {
 
 	parsedHost, err := url.Parse(*host)
 	if err != nil {
-		log.Fatalf("invalid -pleromahost: %v", err)
+		log.Fatalf("invalid -host: %v", err)
 	}
 
 	if parsedHost.Scheme == "" || parsedHost.Host == "" {
-		log.Fatalf("invalid -pleromahost: expected something like https://example.com")
+		log.Fatalf("invalid -host: expected something like https://example.com")
 	}
 
 	if err := cleanUp(
