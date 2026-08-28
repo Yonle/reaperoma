@@ -38,6 +38,7 @@ func (d *durationValue) String() string {
 	if d == nil {
 		return ""
 	}
+
 	return time.Duration(*d).String()
 }
 
@@ -46,9 +47,9 @@ func (d *durationValue) Set(s string) error {
 		return nil
 	}
 
-	// time.ParseDuration doesn't support "d", so add it ourselves.
 	if strings.HasSuffix(s, "d") {
 		var days float64
+
 		if _, err := fmt.Sscanf(strings.TrimSuffix(s, "d"), "%f", &days); err != nil {
 			return fmt.Errorf("invalid day duration %q", s)
 		}
@@ -68,8 +69,7 @@ func (d *durationValue) Set(s string) error {
 
 func deleteUsers(
 	client *http.Client,
-	host string,
-	adminToken string,
+	auth *Auth,
 	nicknames []string,
 ) error {
 	body := DeleteUsersRequest{
@@ -81,7 +81,7 @@ func deleteUsers(
 		return fmt.Errorf("marshal delete request: %w", err)
 	}
 
-	endpoint := strings.TrimRight(host, "/") +
+	endpoint := strings.TrimRight(auth.Host, "/") +
 		"/api/v1/pleroma/admin/users"
 
 	req, err := http.NewRequest(
@@ -93,8 +93,8 @@ func deleteUsers(
 		return fmt.Errorf("create delete request: %w", err)
 	}
 
-	req.Header.Set("X-Admin-Token", adminToken)
 	req.Header.Set("Content-Type", "application/json")
+	auth.Header(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -104,10 +104,106 @@ func deleteUsers(
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
 		return fmt.Errorf(
 			"delete returned HTTP %s: %s",
 			resp.Status,
 			strings.TrimSpace(string(responseBody)),
+		)
+	}
+
+	return nil
+}
+
+func cleanUp(
+	client *http.Client,
+	auth *Auth,
+	cleanAge durationValue,
+) error {
+	log.Println("--- reaperoma cleanup initiated ---")
+	defer log.Println("--- reaperoma cleanup done ---")
+
+	endpoint := strings.TrimRight(auth.Host, "/") +
+		"/api/v1/pleroma/admin/users?page=1&filters=local,unconfirmed"
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("create GET request: %w", err)
+	}
+
+	auth.Header(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+		return fmt.Errorf(
+			"GET returned HTTP %s: %s",
+			resp.Status,
+			strings.TrimSpace(string(responseBody)),
+		)
+	}
+
+	var result UsersResponse
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	now := time.Now()
+
+	var toDelete []User
+
+	for _, user := range result.Users {
+		if user.IsConfirmed {
+			continue
+		}
+
+		age := now.Sub(user.CreatedAt)
+
+		if age <= time.Duration(cleanAge) {
+			log.Printf(
+				"----- ------- %s | email: %s | register_reason: %s | register_age: %s",
+				user.Nickname,
+				user.Email,
+				user.RegistrationReason,
+				age.Round(time.Second),
+			)
+
+			continue
+		}
+
+		toDelete = append(toDelete, user)
+	}
+
+	if len(toDelete) == 0 {
+		return nil
+	}
+
+	nicknames := make([]string, 0, len(toDelete))
+
+	for _, user := range toDelete {
+		nicknames = append(nicknames, user.Nickname)
+	}
+
+	if err := deleteUsers(client, auth, nicknames); err != nil {
+		return fmt.Errorf("delete stale users: %w", err)
+	}
+
+	for _, user := range toDelete {
+		age := now.Sub(user.CreatedAt)
+
+		log.Printf(
+			"DELETE %s | email: %s | register_reason: %s | register_age: %s",
+			user.Nickname,
+			user.Email,
+			user.RegistrationReason,
+			age.Round(time.Second),
 		)
 	}
 
@@ -119,13 +215,21 @@ func main() {
 		host = flag.String(
 			"host",
 			"",
-			"Pleroma instance base URL, e.g. https://pleroma.web.com",
+			"Pleroma instance base URL",
 		)
-		adminToken = flag.String(
-			"admintoken",
-			"",
-			"Pleroma admin token",
+
+		statePath = flag.String(
+			"stateFile",
+			"reaperoma-state.json",
+			"Reaperoma's login state file",
 		)
+
+		login = flag.Bool(
+			"login",
+			false,
+			"Authenticate with a Pleroma instance and save the login state",
+		)
+
 		cleanAge      durationValue
 		checkInterval durationValue
 
@@ -148,37 +252,63 @@ func main() {
 
 	flag.Parse()
 
-	if *host == "" {
-		fmt.Fprintln(os.Stderr, "error: -host is required")
-		os.Exit(2)
+	auth := &Auth{
+		Client:    client,
+		StatePath: *statePath,
 	}
 
-	if *adminToken == "" {
-		fmt.Fprintln(os.Stderr, "error: -admintoken is required")
-		os.Exit(2)
+	// Explicit login mode.
+	if *login {
+		if *host == "" {
+			log.Fatal("-host is required when using -login")
+		}
+
+		auth.Host = strings.TrimRight(*host, "/")
+
+		if _, err := url.ParseRequestURI(auth.Host); err != nil {
+			log.Fatalf("invalid -host: %v", err)
+		}
+
+		performLogin(auth)
+		return
+	}
+
+	// Normal cleanup mode.
+	if err := auth.LoadState(); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatal("not authenticated yet; run with -login -host <pleroma host>")
+		}
+
+		log.Fatalf("load auth state: %v", err)
+	}
+
+	if auth.Host == "" {
+		log.Fatal("auth state does not contain a Pleroma host; run with -login -host <pleroma host>")
+	}
+
+	if auth.AccessToken == "" {
+		log.Fatal("auth state does not contain an access token; run with -login -host <pleroma host>")
 	}
 
 	if cleanAge <= 0 {
-		fmt.Fprintln(os.Stderr, "error: -cleanAge must be greater than 0")
-		os.Exit(2)
+		log.Fatal("-cleanAge must be greater than 0")
 	}
 
-	parsedHost, err := url.Parse(*host)
+	parsedHost, err := url.Parse(auth.Host)
 	if err != nil {
-		log.Fatalf("invalid -host: %v", err)
+		log.Fatalf("invalid stored host: %v", err)
 	}
 
 	if parsedHost.Scheme == "" || parsedHost.Host == "" {
-		log.Fatalf("invalid -host: expected something like https://example.com")
+		log.Fatal("invalid stored host")
 	}
 
 	if err := cleanUp(
 		client,
-		*host,
-		*adminToken,
+		auth,
 		cleanAge,
 	); err != nil {
-		log.Println("error during cleanup: ", err)
+		log.Println("error during cleanup:", err)
 	}
 
 	if checkInterval > 0 {
@@ -188,104 +318,11 @@ func main() {
 		for range ticker.C {
 			if err := cleanUp(
 				client,
-				*host,
-				*adminToken,
+				auth,
 				cleanAge,
 			); err != nil {
-				log.Println("error during cleanup: ", err)
+				log.Println("error during cleanup:", err)
 			}
 		}
 	}
-}
-
-func cleanUp(
-	client *http.Client,
-	host string,
-	adminToken string,
-	cleanAge durationValue,
-) error {
-
-	log.Println("--- reaperoma cleanup initiated ---")
-	defer log.Println("--- reaperoma cleanup done ---")
-
-	endpoint := strings.TrimRight(host, "/") +
-		"/api/v1/pleroma/admin/users?page=1&filters=local,unconfirmed"
-
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("create GET request: %v", err)
-	}
-
-	req.Header.Set("X-Admin-Token", adminToken)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("GET request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf(
-			"GET returned HTTP %s: %s",
-			resp.Status,
-			strings.TrimSpace(string(responseBody)),
-		)
-	}
-
-	var result UsersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode response: %v", err)
-	}
-
-	now := time.Now()
-
-	var toDelete []User
-
-	for _, user := range result.Users {
-		if user.IsConfirmed {
-			continue
-		}
-
-		age := now.Sub(user.CreatedAt)
-
-		if age <= time.Duration(cleanAge) {
-			log.Printf(
-				"----- ------- %s | email: %s | register_reason: %s | register_age: %s",
-				user.Nickname,
-				user.Email,
-				user.RegistrationReason,
-				age.Round(time.Second),
-			)
-			continue
-		}
-
-		toDelete = append(toDelete, user)
-	}
-
-	if len(toDelete) == 0 {
-		return nil
-	}
-
-	nicknames := make([]string, 0, len(toDelete))
-	for _, user := range toDelete {
-		nicknames = append(nicknames, user.Nickname)
-	}
-
-	if err := deleteUsers(client, host, adminToken, nicknames); err != nil {
-		return fmt.Errorf("delete stale users: %w", err)
-	}
-
-	for _, user := range toDelete {
-		age := now.Sub(user.CreatedAt)
-
-		log.Printf(
-			"DELETE %s | email: %s | register_reason: %s | register_age: %s",
-			user.Nickname,
-			user.Email,
-			user.RegistrationReason,
-			age.Round(time.Second),
-		)
-	}
-	return nil
 }
