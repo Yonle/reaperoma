@@ -67,6 +67,26 @@ func (d *durationValue) Set(s string) error {
 	return nil
 }
 
+func makeFilters(
+	unconfirmed,
+	need_approval bool,
+) string {
+	var s strings.Builder
+
+	// always look for locals
+	s.WriteString("local")
+
+	if unconfirmed {
+		s.WriteString(",unconfirmed")
+	}
+
+	if need_approval {
+		s.WriteString(",need_approval")
+	}
+
+	return s.String()
+}
+
 func deleteUsers(
 	client *http.Client,
 	auth *Auth,
@@ -119,12 +139,13 @@ func cleanUp(
 	client *http.Client,
 	auth *Auth,
 	cleanAge durationValue,
+	filters string,
 ) error {
 	log.Println("--- reaperoma cleanup initiated ---")
 	defer log.Println("--- reaperoma cleanup done ---")
 
 	endpoint := strings.TrimRight(auth.Host, "/") +
-		"/api/v1/pleroma/admin/users?page=1&filters=local,unconfirmed,need_approval"
+		"/api/v1/pleroma/admin/users?page=1&filters=" + filters
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -230,6 +251,12 @@ func main() {
 			"Authenticate with a Pleroma instance and save the login state",
 		)
 
+		ignoreApproval = flag.Bool(
+			"ignoreApproval",
+			false,
+			"Ignore administrator approval of an unconfirmed account",
+		)
+
 		cleanAge      durationValue
 		checkInterval durationValue
 
@@ -303,10 +330,13 @@ func main() {
 		log.Fatal("invalid stored host")
 	}
 
+	filters := makeFilters(true, !*ignoreApproval)
+
 	if err := cleanUp(
 		client,
 		auth,
 		cleanAge,
+		filters,
 	); err != nil {
 		log.Println("error during cleanup:", err)
 	}
@@ -320,6 +350,7 @@ func main() {
 				client,
 				auth,
 				cleanAge,
+				filters,
 			); err != nil {
 				log.Println("error during cleanup:", err)
 			}
