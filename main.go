@@ -124,7 +124,7 @@ func cleanUp(
 	defer log.Println("--- reaperoma cleanup done ---")
 
 	endpoint := strings.TrimRight(auth.Host, "/") +
-		"/api/v1/pleroma/admin/users?page=1&filters=local,unconfirmed"
+		"/api/v1/pleroma/admin/users?page=1&filters=local,unconfirmed,need_approval"
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
